@@ -152,11 +152,14 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
     pruner_unstructured = CustomPruner(model_copy)
 
     # Try different sparsity levels to find maximum that meets accuracy requirement
-    target_sparsities = [0.70, 0.80, 0.85, 0.90, 0.95]
+    # Use absolute 85% threshold as per assignment requirements
+    absolute_target_accuracy = 85.0 if model_name.lower() == 'cnn' else 80.0
+    target_sparsities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
     best_unstructured_sparsity = 0
     best_unstructured_accuracy = 0
 
     for sparsity in target_sparsities:
+        print(f"\nTesting unstructured sparsity: {sparsity:.2f}")
         # Reset model
         model_copy.load_state_dict(model.state_dict())
         pruner_unstructured = CustomPruner(model_copy)
@@ -164,25 +167,25 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
         # Apply pruning
         pruner_unstructured.magnitude_based_unstructured_pruning(sparsity)
 
-        # Fine-tune
+        # Fine-tune with more epochs for better recovery
         trainer = Trainer(model_copy, device, save_dir=args.save_dir)
-        trainer.fine_tune(train_loader, test_loader, num_epochs=20, learning_rate=0.01)
+        trainer.fine_tune(train_loader, test_loader, num_epochs=30, learning_rate=0.001)
 
         # Evaluate
         evaluator = ModelEvaluator(model_copy, device)
         pruned_accuracy = evaluator.evaluate_accuracy(test_loader, verbose=False)['overall_accuracy']
         achieved_sparsity = pruner_unstructured.calculate_sparsity()
 
-        print(f"Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
+        print(f"  Result - Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
 
-        if pruned_accuracy >= target_accuracy:
+        # Keep the best result that meets the absolute accuracy threshold
+        if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_unstructured_sparsity:
             best_unstructured_sparsity = achieved_sparsity
             best_unstructured_accuracy = pruned_accuracy
             # Save best unstructured model
             torch.save(model_copy.state_dict(),
                       os.path.join(args.save_dir, f'{model_name.lower()}_after_unstructured_pruning.pth'))
-        else:
-            break
+            print(f"  *** New best unstructured result! ***")
 
     results['unstructured'] = {
         'pruning_percentage': best_unstructured_sparsity * 100,
@@ -195,11 +198,12 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
     pruner_structured = CustomPruner(model_copy)
 
     # Try different pruning ratios for structured pruning
-    channel_ratios = [0.25, 0.35, 0.45, 0.55, 0.65]
+    channel_ratios = [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
     best_structured_sparsity = 0
     best_structured_accuracy = 0
 
     for ratio in channel_ratios:
+        print(f"\nTesting structured pruning ratio: {ratio:.2f}")
         # Reset model
         model_copy.load_state_dict(model.state_dict())
         pruner_structured = CustomPruner(model_copy)
@@ -207,25 +211,25 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
         # Apply structured pruning
         pruner_structured.structured_channel_pruning(ratio)
 
-        # Fine-tune
+        # Fine-tune with more epochs
         trainer = Trainer(model_copy, device, save_dir=args.save_dir)
-        trainer.fine_tune(train_loader, test_loader, num_epochs=20, learning_rate=0.01)
+        trainer.fine_tune(train_loader, test_loader, num_epochs=30, learning_rate=0.001)
 
         # Evaluate
         evaluator = ModelEvaluator(model_copy, device)
         pruned_accuracy = evaluator.evaluate_accuracy(test_loader, verbose=False)['overall_accuracy']
         achieved_sparsity = pruner_structured.calculate_sparsity()
 
-        print(f"Channel ratio: {ratio:.2f}, Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
+        print(f"  Result - Channel ratio: {ratio:.2f}, Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
 
-        if pruned_accuracy >= target_accuracy:
+        # Keep the best result that meets the absolute accuracy threshold
+        if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_structured_sparsity:
             best_structured_sparsity = achieved_sparsity
             best_structured_accuracy = pruned_accuracy
             # Save best structured model
             torch.save(model_copy.state_dict(),
                       os.path.join(args.save_dir, f'{model_name.lower()}_after_structured_pruning.pth'))
-        else:
-            break
+            print(f"  *** New best structured result! ***")
 
     results['structured'] = {
         'pruning_percentage': best_structured_sparsity * 100,
@@ -305,6 +309,9 @@ def main():
 
     # Train and prune ViT-Tiny
     if args.model in ['vit', 'all']:
+        vit_model = None
+        target_vit_accuracy = 80.0  # Default target
+
         if args.experiment in ['train', 'all']:
             # Try pre-trained first, then from scratch
             try:
@@ -313,29 +320,40 @@ def main():
             except Exception as e:
                 print(f"Pre-trained ViT failed: {e}")
                 print("Falling back to training from scratch...")
-                vit_model, vit_accuracy = train_vit_tiny(args, device, pretrained=False)
-                target_vit_accuracy = 80.0  # Lower target for from-scratch
+                try:
+                    vit_model, vit_accuracy = train_vit_tiny(args, device, pretrained=False)
+                    target_vit_accuracy = 80.0  # Lower target for from-scratch
+                except Exception as e2:
+                    print(f"From-scratch ViT also failed: {e2}")
+                    print("Skipping ViT experiments")
+                    vit_model = None
 
-            results['initial_accuracies']['vit_before_pruning'] = vit_accuracy / 100.0
+            if vit_model is not None:
+                results['initial_accuracies']['vit_before_pruning'] = vit_accuracy / 100.0
 
-        if args.experiment in ['prune', 'all']:
+        if args.experiment in ['prune', 'all'] and vit_model is not None:
             # Load model if we skipped training
-            if args.skip_training:
-                vit_model = get_vit_tiny_cifar10().to(device)
-                vit_model.load_state_dict(torch.load(
-                    os.path.join(args.save_dir, 'vit_before_pruning.pth'),
-                    map_location=device
-                ))
-                target_vit_accuracy = 80.0
+            if args.skip_training or vit_model is None:
+                try:
+                    vit_model = get_vit_tiny_cifar10().to(device)
+                    vit_model.load_state_dict(torch.load(
+                        os.path.join(args.save_dir, 'vit_before_pruning.pth'),
+                        map_location=device
+                    ))
+                    target_vit_accuracy = 80.0
+                except Exception as e:
+                    print(f"Failed to load ViT model: {e}")
+                    vit_model = None
 
-            vit_results = perform_pruning_experiment(
-                vit_model, 'vit', target_vit_accuracy, args, device
-            )
+            if vit_model is not None:
+                vit_results = perform_pruning_experiment(
+                    vit_model, 'vit', target_vit_accuracy, args, device
+                )
 
-            results['unstructured_pruning']['vit'] = vit_results['unstructured']
-            results['structured_pruning']['vit'] = vit_results['structured']
-            results['unstructured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
-            results['structured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
+                results['unstructured_pruning']['vit'] = vit_results['unstructured']
+                results['structured_pruning']['vit'] = vit_results['structured']
+                results['unstructured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
+                results['structured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
 
     # Save results to report.json
     report_path = os.path.join(os.getcwd(), 'report.json')
