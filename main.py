@@ -145,8 +145,8 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
 
     # Unstructured Pruning
     print(f"\nPerforming unstructured pruning...")
-    model_copy = type(model)(**{} if hasattr(model, '__dict__') else {})
-    model_copy.load_state_dict(model.state_dict())
+    import copy
+    model_copy = copy.deepcopy(model)
     model_copy = model_copy.to(device)
 
     pruner_unstructured = CustomPruner(model_copy)
