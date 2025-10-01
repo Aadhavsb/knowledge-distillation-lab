@@ -157,6 +157,9 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
     target_sparsities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
     best_unstructured_sparsity = 0
     best_unstructured_accuracy = 0
+    fallback_unstructured_sparsity = 0
+    fallback_unstructured_accuracy = 0
+    best_model_state = None
 
     for sparsity in target_sparsities:
         print(f"\nTesting unstructured sparsity: {sparsity:.2f}")
@@ -178,6 +181,13 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
 
         print(f"  Result - Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
 
+        # Track best overall result (highest sparsity with best accuracy) as fallback
+        if achieved_sparsity > fallback_unstructured_sparsity or \
+           (achieved_sparsity == fallback_unstructured_sparsity and pruned_accuracy > fallback_unstructured_accuracy):
+            fallback_unstructured_sparsity = achieved_sparsity
+            fallback_unstructured_accuracy = pruned_accuracy
+            best_model_state = model_copy.state_dict().copy()
+
         # Keep the best result that meets the absolute accuracy threshold
         if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_unstructured_sparsity:
             best_unstructured_sparsity = achieved_sparsity
@@ -186,6 +196,17 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
             torch.save(model_copy.state_dict(),
                       os.path.join(args.save_dir, f'{model_name.lower()}_after_unstructured_pruning.pth'))
             print(f"  *** New best unstructured result! ***")
+
+    # If no sparsity level met threshold, use best fallback
+    if best_unstructured_sparsity == 0 and fallback_unstructured_sparsity > 0:
+        print(f"\n⚠️  No sparsity level met {absolute_target_accuracy}% accuracy threshold.")
+        print(f"Using best attempt: {fallback_unstructured_sparsity*100:.1f}% sparsity, {fallback_unstructured_accuracy:.2f}% accuracy")
+        best_unstructured_sparsity = fallback_unstructured_sparsity
+        best_unstructured_accuracy = fallback_unstructured_accuracy
+        # Save fallback model
+        if best_model_state is not None:
+            torch.save(best_model_state,
+                      os.path.join(args.save_dir, f'{model_name.lower()}_after_unstructured_pruning.pth'))
 
     results['unstructured'] = {
         'pruning_percentage': best_unstructured_sparsity * 100,
@@ -201,6 +222,9 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
     channel_ratios = [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
     best_structured_sparsity = 0
     best_structured_accuracy = 0
+    fallback_structured_sparsity = 0
+    fallback_structured_accuracy = 0
+    best_structured_state = None
 
     for ratio in channel_ratios:
         print(f"\nTesting structured pruning ratio: {ratio:.2f}")
@@ -222,6 +246,13 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
 
         print(f"  Result - Channel ratio: {ratio:.2f}, Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
 
+        # Track best overall result as fallback
+        if achieved_sparsity > fallback_structured_sparsity or \
+           (achieved_sparsity == fallback_structured_sparsity and pruned_accuracy > fallback_structured_accuracy):
+            fallback_structured_sparsity = achieved_sparsity
+            fallback_structured_accuracy = pruned_accuracy
+            best_structured_state = model_copy.state_dict().copy()
+
         # Keep the best result that meets the absolute accuracy threshold
         if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_structured_sparsity:
             best_structured_sparsity = achieved_sparsity
@@ -230,6 +261,17 @@ def perform_pruning_experiment(model, model_name, target_accuracy, args, device)
             torch.save(model_copy.state_dict(),
                       os.path.join(args.save_dir, f'{model_name.lower()}_after_structured_pruning.pth'))
             print(f"  *** New best structured result! ***")
+
+    # If no ratio met threshold, use best fallback
+    if best_structured_sparsity == 0 and fallback_structured_sparsity > 0:
+        print(f"\n⚠️  No channel ratio met {absolute_target_accuracy}% accuracy threshold.")
+        print(f"Using best attempt: {fallback_structured_sparsity*100:.1f}% sparsity, {fallback_structured_accuracy:.2f}% accuracy")
+        best_structured_sparsity = fallback_structured_sparsity
+        best_structured_accuracy = fallback_structured_accuracy
+        # Save fallback model
+        if best_structured_state is not None:
+            torch.save(best_structured_state,
+                      os.path.join(args.save_dir, f'{model_name.lower()}_after_structured_pruning.pth'))
 
     results['structured'] = {
         'pruning_percentage': best_structured_sparsity * 100,
