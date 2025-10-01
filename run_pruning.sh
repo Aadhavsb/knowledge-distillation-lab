@@ -4,7 +4,7 @@
 #SBATCH -c 24
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32GB
-#SBATCH -t 24:00:00
+#SBATCH -t 16:00:00
 #SBATCH --output=pruning_%j.log
 
 module load Python/3.11.3-GCCcore-12.3.0
