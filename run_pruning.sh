@@ -2,7 +2,8 @@
 #SBATCH --job-name=pruning
 #SBATCH -p gpu
 #SBATCH -c 24
-#SBATCH --gres=gpu:rtx2080ti:1
+#SBATCH --gres=gpu:1
+#SBATCH --nodelist=gput051
 #SBATCH --mem=32GB
 #SBATCH -t 24:00:00
 #SBATCH --output=pruning_%j.log
