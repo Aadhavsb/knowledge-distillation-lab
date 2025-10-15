@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ECSE 397/600: Efficient Deep Learning - Lab 1
-Custom Pruning of ResNet-18 and ViT-Tiny
+ECSE 397/600: Efficient Deep Learning - Lab 2
+Knowledge Distillation with ResNet-18 and ViT-Tiny
 
 Main entry point for running experiments.
 """
@@ -10,15 +10,15 @@ import argparse
 import json
 import os
 import torch
-import torch.nn as nn
-from datetime import datetime
 
 # Import our modules
 from data.dataloader import get_loaders
-from models.resnet18 import get_resnet18_cifar10
-from models.vit_tiny import get_vit_tiny_cifar10, get_vit_tiny_pretrained_timm
-from train.train_loop import Trainer
-from train.prune import CustomPruner
+from models.teacher_resnet import get_resnet18_teacher
+from models.teacher_vit import get_vit_tiny_teacher
+from models.student_resnet import get_resnet8_student
+from models.student_vit import get_vit_student
+from train.train_teacher import train_teacher_model
+from train.distill import train_student_with_kd, train_student_without_kd
 from inference.test import ModelEvaluator
 
 
@@ -33,395 +33,290 @@ def setup_device():
     return device
 
 
-def train_resnet18(args, device):
-    """Train ResNet-18 model."""
-    print("\n" + "="*60)
-    print("TRAINING RESNET-18")
-    print("="*60)
+def train_teachers(args, device, train_loader, test_loader):
+    """Train both teacher models."""
+    results = {}
 
-    # Create model
-    model = get_resnet18_cifar10(pretrained=args.pretrained).to(device)
-    print(f"Model created. Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print("\n" + "="*80)
+    print("STEP 1: TRAINING TEACHER MODELS")
+    print("="*80)
 
-    # Get data loaders
-    train_loader, test_loader = get_loaders(batch_size=args.batch_size)
-
-    # Create trainer
-    trainer = Trainer(model, device, save_dir=args.save_dir)
-
-    # Train model
-    if not args.skip_training:
-        print("Starting training...")
-        trainer.train(
-            train_loader, test_loader,
-            num_epochs=args.epochs,
-            learning_rate=args.lr,
-            save_best=True
-        )
-
-        # Save trained model
-        trainer.save_model('cnn_before_pruning.pth')
-
-    # Evaluate trained model
-    evaluator = ModelEvaluator(model, device)
-    accuracy = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
-
-    print(f"ResNet-18 training completed. Final accuracy: {accuracy:.2f}%")
-    return model, accuracy
-
-
-def train_vit_tiny(args, device, pretrained=True):
-    """Train ViT-Tiny model."""
-    model_type = "ViT-Tiny (Pre-trained)" if pretrained else "ViT-Tiny (From Scratch)"
-    print(f"\n" + "="*60)
-    print(f"TRAINING {model_type.upper()}")
-    print("="*60)
-
-    # Create model
-    if pretrained:
-        try:
-            model = get_vit_tiny_pretrained_timm(num_classes=10).to(device)
-            print("Using pre-trained ViT-Tiny from timm")
-        except ImportError:
-            print("timm not available, using custom ViT-Tiny")
-            model = get_vit_tiny_cifar10(pretrained=False).to(device)
+    # Train ResNet-18 Teacher
+    if args.skip_cnn_teacher:
+        print("\nSkipping CNN teacher training (loading from checkpoint)...")
+        cnn_teacher = get_resnet18_teacher().to(device)
+        cnn_teacher.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'cnn_teacher.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(cnn_teacher, device)
+        cnn_teacher_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
     else:
-        model = get_vit_tiny_cifar10(pretrained=False).to(device)
-
-    print(f"Model created. Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Get data loaders
-    train_loader, test_loader = get_loaders(batch_size=args.batch_size)
-
-    # Create trainer
-    trainer = Trainer(model, device, save_dir=args.save_dir)
-
-    # Train model
-    if not args.skip_training:
-        print("Starting training...")
-        epochs = args.epochs if not pretrained else max(args.epochs // 2, 30)  # Fewer epochs for pre-trained
-        lr = args.lr if not pretrained else args.lr * 0.1  # Lower LR for pre-trained
-
-        trainer.train(
-            train_loader, test_loader,
-            num_epochs=epochs,
-            learning_rate=lr,
-            save_best=True
+        print("\nTraining ResNet-18 Teacher...")
+        cnn_teacher = get_resnet18_teacher().to(device)
+        _, cnn_teacher_acc = train_teacher_model(
+            cnn_teacher, train_loader, test_loader, device,
+            model_name="cnn_teacher",
+            save_dir=args.save_dir,
+            num_epochs=args.teacher_epochs,
+            learning_rate=args.lr
         )
 
-        # Save trained model
-        trainer.save_model('vit_before_pruning.pth')
+    results['cnn_teacher_accuracy'] = cnn_teacher_acc / 100.0
+    print(f"\nResNet-18 Teacher Final Accuracy: {cnn_teacher_acc:.2f}%")
 
-    # Evaluate trained model
-    evaluator = ModelEvaluator(model, device)
-    accuracy = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    # Train ViT-Tiny Teacher
+    if args.skip_vit_teacher:
+        print("\nSkipping ViT teacher training (loading from checkpoint)...")
+        vit_teacher = get_vit_tiny_teacher().to(device)
+        vit_teacher.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'vit_teacher.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(vit_teacher, device)
+        vit_teacher_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    else:
+        print("\nTraining ViT-Tiny Teacher...")
+        vit_teacher = get_vit_tiny_teacher().to(device)
+        _, vit_teacher_acc = train_teacher_model(
+            vit_teacher, train_loader, test_loader, device,
+            model_name="vit_teacher",
+            save_dir=args.save_dir,
+            num_epochs=args.teacher_epochs,
+            learning_rate=args.lr
+        )
 
-    print(f"{model_type} training completed. Final accuracy: {accuracy:.2f}%")
-    return model, accuracy
+    results['vit_teacher_accuracy'] = vit_teacher_acc / 100.0
+    print(f"\nViT-Tiny Teacher Final Accuracy: {vit_teacher_acc:.2f}%")
+
+    return cnn_teacher, vit_teacher, results
 
 
-def perform_pruning_experiment(model, model_name, target_accuracy, args, device):
-    """Perform pruning experiments on a model."""
-    print(f"\n" + "="*60)
-    print(f"PRUNING EXPERIMENTS - {model_name.upper()}")
-    print("="*60)
+def train_students_without_kd(args, device, train_loader, test_loader):
+    """Train student models without knowledge distillation (baseline)."""
+    results = {}
 
-    # Get data loaders
-    train_loader, test_loader = get_loaders(batch_size=args.batch_size)
+    print("\n" + "="*80)
+    print("STEP 2: TRAINING STUDENT MODELS WITHOUT KD (BASELINE)")
+    print("="*80)
 
-    # Create pruner
-    pruner = CustomPruner(model)
+    # Train ResNet-8 Student without KD
+    if args.skip_cnn_student_no_kd:
+        print("\nSkipping CNN student (no KD) training (loading from checkpoint)...")
+        cnn_student = get_resnet8_student().to(device)
+        cnn_student.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'cnn_student_no_kd.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(cnn_student, device)
+        cnn_student_no_kd_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    else:
+        print("\nTraining ResNet-8 Student (without KD)...")
+        cnn_student = get_resnet8_student().to(device)
+        _, cnn_student_no_kd_acc = train_student_without_kd(
+            cnn_student, train_loader, test_loader, device,
+            model_name="cnn_student_no_kd",
+            save_dir=args.save_dir,
+            num_epochs=args.student_epochs,
+            learning_rate=args.lr
+        )
 
-    # Save original weights
-    pruner.save_original_weights()
+    results['cnn_student_no_kd_accuracy'] = cnn_student_no_kd_acc / 100.0
+    print(f"\nResNet-8 Student (no KD) Final Accuracy: {cnn_student_no_kd_acc:.2f}%")
 
-    # Get baseline evaluation
-    evaluator = ModelEvaluator(model, device)
-    baseline_accuracy = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    # Train ViT Student without KD
+    if args.skip_vit_student_no_kd:
+        print("\nSkipping ViT student (no KD) training (loading from checkpoint)...")
+        vit_student = get_vit_student().to(device)
+        vit_student.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'vit_student_no_kd.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(vit_student, device)
+        vit_student_no_kd_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    else:
+        print("\nTraining ViT Student (without KD)...")
+        vit_student = get_vit_student().to(device)
+        _, vit_student_no_kd_acc = train_student_without_kd(
+            vit_student, train_loader, test_loader, device,
+            model_name="vit_student_no_kd",
+            save_dir=args.save_dir,
+            num_epochs=args.student_epochs,
+            learning_rate=args.lr
+        )
 
-    results = {
-        'original_accuracy': baseline_accuracy / 100.0
-    }
-
-    # Unstructured Pruning
-    print(f"\nPerforming unstructured pruning...")
-    import copy
-    model_copy = copy.deepcopy(model)
-    model_copy = model_copy.to(device)
-
-    pruner_unstructured = CustomPruner(model_copy)
-
-    # Try different sparsity levels to find maximum that meets accuracy requirement
-    # Use absolute 85% threshold as per assignment requirements
-    absolute_target_accuracy = 85.0 if model_name.lower() == 'cnn' else 80.0
-    target_sparsities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-    best_unstructured_sparsity = 0
-    best_unstructured_accuracy = 0
-    fallback_unstructured_sparsity = 0
-    fallback_unstructured_accuracy = 0
-    best_model_state = None
-
-    for sparsity in target_sparsities:
-        print(f"\nTesting unstructured sparsity: {sparsity:.2f}")
-        # Reset model
-        model_copy.load_state_dict(model.state_dict())
-        pruner_unstructured = CustomPruner(model_copy)
-
-        # Apply pruning
-        pruner_unstructured.magnitude_based_unstructured_pruning(sparsity)
-
-        # Fine-tune with more epochs for better recovery
-        trainer = Trainer(model_copy, device, save_dir=args.save_dir)
-        trainer.fine_tune(train_loader, test_loader, num_epochs=30, learning_rate=0.001)
-
-        # Evaluate
-        evaluator = ModelEvaluator(model_copy, device)
-        pruned_accuracy = evaluator.evaluate_accuracy(test_loader, verbose=False)['overall_accuracy']
-        achieved_sparsity = pruner_unstructured.calculate_sparsity()
-
-        print(f"  Result - Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
-
-        # Track best overall result (highest sparsity with best accuracy) as fallback
-        if achieved_sparsity > fallback_unstructured_sparsity or \
-           (achieved_sparsity == fallback_unstructured_sparsity and pruned_accuracy > fallback_unstructured_accuracy):
-            fallback_unstructured_sparsity = achieved_sparsity
-            fallback_unstructured_accuracy = pruned_accuracy
-            best_model_state = model_copy.state_dict().copy()
-
-        # Keep the best result that meets the absolute accuracy threshold
-        if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_unstructured_sparsity:
-            best_unstructured_sparsity = achieved_sparsity
-            best_unstructured_accuracy = pruned_accuracy
-            # Save best unstructured model
-            torch.save(model_copy.state_dict(),
-                      os.path.join(args.save_dir, f'{model_name.lower()}_after_unstructured_pruning.pth'))
-            print(f"  *** New best unstructured result! ***")
-
-    # If no sparsity level met threshold, use best fallback
-    if best_unstructured_sparsity == 0 and fallback_unstructured_sparsity > 0:
-        print(f"\n⚠️  No sparsity level met {absolute_target_accuracy}% accuracy threshold.")
-        print(f"Using best attempt: {fallback_unstructured_sparsity*100:.1f}% sparsity, {fallback_unstructured_accuracy:.2f}% accuracy")
-        best_unstructured_sparsity = fallback_unstructured_sparsity
-        best_unstructured_accuracy = fallback_unstructured_accuracy
-        # Save fallback model
-        if best_model_state is not None:
-            torch.save(best_model_state,
-                      os.path.join(args.save_dir, f'{model_name.lower()}_after_unstructured_pruning.pth'))
-
-    results['unstructured'] = {
-        'pruning_percentage': best_unstructured_sparsity * 100,
-        'pruned_accuracy': best_unstructured_accuracy / 100.0
-    }
-
-    # Structured Pruning
-    print(f"\nPerforming structured pruning...")
-    model_copy.load_state_dict(model.state_dict())
-    pruner_structured = CustomPruner(model_copy)
-
-    # Try different pruning ratios for structured pruning
-    channel_ratios = [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
-    best_structured_sparsity = 0
-    best_structured_accuracy = 0
-    fallback_structured_sparsity = 0
-    fallback_structured_accuracy = 0
-    best_structured_state = None
-
-    for ratio in channel_ratios:
-        print(f"\nTesting structured pruning ratio: {ratio:.2f}")
-        # Reset model
-        model_copy.load_state_dict(model.state_dict())
-        pruner_structured = CustomPruner(model_copy)
-
-        # Apply structured pruning
-        pruner_structured.structured_channel_pruning(ratio)
-
-        # Fine-tune with more epochs
-        trainer = Trainer(model_copy, device, save_dir=args.save_dir)
-        trainer.fine_tune(train_loader, test_loader, num_epochs=30, learning_rate=0.001)
-
-        # Evaluate
-        evaluator = ModelEvaluator(model_copy, device)
-        pruned_accuracy = evaluator.evaluate_accuracy(test_loader, verbose=False)['overall_accuracy']
-        achieved_sparsity = pruner_structured.calculate_sparsity()
-
-        print(f"  Result - Channel ratio: {ratio:.2f}, Sparsity: {achieved_sparsity:.3f}, Accuracy: {pruned_accuracy:.2f}%")
-
-        # Track best overall result as fallback
-        if achieved_sparsity > fallback_structured_sparsity or \
-           (achieved_sparsity == fallback_structured_sparsity and pruned_accuracy > fallback_structured_accuracy):
-            fallback_structured_sparsity = achieved_sparsity
-            fallback_structured_accuracy = pruned_accuracy
-            best_structured_state = model_copy.state_dict().copy()
-
-        # Keep the best result that meets the absolute accuracy threshold
-        if pruned_accuracy >= absolute_target_accuracy and achieved_sparsity > best_structured_sparsity:
-            best_structured_sparsity = achieved_sparsity
-            best_structured_accuracy = pruned_accuracy
-            # Save best structured model
-            torch.save(model_copy.state_dict(),
-                      os.path.join(args.save_dir, f'{model_name.lower()}_after_structured_pruning.pth'))
-            print(f"  *** New best structured result! ***")
-
-    # If no ratio met threshold, use best fallback
-    if best_structured_sparsity == 0 and fallback_structured_sparsity > 0:
-        print(f"\n⚠️  No channel ratio met {absolute_target_accuracy}% accuracy threshold.")
-        print(f"Using best attempt: {fallback_structured_sparsity*100:.1f}% sparsity, {fallback_structured_accuracy:.2f}% accuracy")
-        best_structured_sparsity = fallback_structured_sparsity
-        best_structured_accuracy = fallback_structured_accuracy
-        # Save fallback model
-        if best_structured_state is not None:
-            torch.save(best_structured_state,
-                      os.path.join(args.save_dir, f'{model_name.lower()}_after_structured_pruning.pth'))
-
-    results['structured'] = {
-        'pruning_percentage': best_structured_sparsity * 100,
-        'pruned_accuracy': best_structured_accuracy / 100.0
-    }
-
-    print(f"\nPruning results for {model_name}:")
-    print(f"Original accuracy: {baseline_accuracy:.2f}%")
-    print(f"Best unstructured: {best_unstructured_sparsity*100:.1f}% sparsity, {best_unstructured_accuracy:.2f}% accuracy")
-    print(f"Best structured: {best_structured_sparsity*100:.1f}% sparsity, {best_structured_accuracy:.2f}% accuracy")
+    results['vit_student_no_kd_accuracy'] = vit_student_no_kd_acc / 100.0
+    print(f"\nViT Student (no KD) Final Accuracy: {vit_student_no_kd_acc:.2f}%")
 
     return results
 
 
+def train_students_with_kd(args, device, cnn_teacher, vit_teacher,
+                           train_loader, test_loader):
+    """Train student models with knowledge distillation."""
+    results = {}
+
+    print("\n" + "="*80)
+    print("STEP 3: TRAINING STUDENT MODELS WITH KD")
+    print("="*80)
+
+    # Train ResNet-8 Student with KD
+    if args.skip_cnn_student_kd:
+        print("\nSkipping CNN student (with KD) training (loading from checkpoint)...")
+        cnn_student_kd = get_resnet8_student().to(device)
+        cnn_student_kd.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'cnn_student_with_kd.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(cnn_student_kd, device)
+        cnn_student_kd_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    else:
+        print("\nTraining ResNet-8 Student (with KD)...")
+        cnn_student_kd = get_resnet8_student().to(device)
+        _, cnn_student_kd_acc = train_student_with_kd(
+            cnn_student_kd, cnn_teacher, train_loader, test_loader, device,
+            model_name="cnn_student_with_kd",
+            save_dir=args.save_dir,
+            num_epochs=args.student_epochs,
+            learning_rate=args.lr,
+            alpha=args.alpha,
+            temperature=args.temperature
+        )
+
+    results['cnn_student_kd_accuracy'] = cnn_student_kd_acc / 100.0
+    print(f"\nResNet-8 Student (with KD) Final Accuracy: {cnn_student_kd_acc:.2f}%")
+
+    # Train ViT Student with KD
+    if args.skip_vit_student_kd:
+        print("\nSkipping ViT student (with KD) training (loading from checkpoint)...")
+        vit_student_kd = get_vit_student().to(device)
+        vit_student_kd.load_state_dict(torch.load(
+            os.path.join(args.save_dir, 'vit_student_with_kd.pth'),
+            map_location=device
+        ))
+        evaluator = ModelEvaluator(vit_student_kd, device)
+        vit_student_kd_acc = evaluator.evaluate_accuracy(test_loader)['overall_accuracy']
+    else:
+        print("\nTraining ViT Student (with KD)...")
+        vit_student_kd = get_vit_student().to(device)
+        _, vit_student_kd_acc = train_student_with_kd(
+            vit_student_kd, vit_teacher, train_loader, test_loader, device,
+            model_name="vit_student_with_kd",
+            save_dir=args.save_dir,
+            num_epochs=args.student_epochs,
+            learning_rate=args.lr,
+            alpha=args.alpha,
+            temperature=args.temperature
+        )
+
+    results['vit_student_kd_accuracy'] = vit_student_kd_acc / 100.0
+    print(f"\nViT Student (with KD) Final Accuracy: {vit_student_kd_acc:.2f}%")
+
+    return results
+
+
+def generate_report(teacher_results, student_no_kd_results, student_kd_results):
+    """Generate report.json with all results."""
+    report = {
+        "cnn": {
+            "teacher_accuracy": teacher_results['cnn_teacher_accuracy'],
+            "student_accuracy_without_kd": student_no_kd_results['cnn_student_no_kd_accuracy'],
+            "student_accuracy_with_kd": student_kd_results['cnn_student_kd_accuracy']
+        },
+        "vit": {
+            "teacher_accuracy": teacher_results['vit_teacher_accuracy'],
+            "student_accuracy_without_kd": student_no_kd_results['vit_student_no_kd_accuracy'],
+            "student_accuracy_with_kd": student_kd_results['vit_student_kd_accuracy']
+        }
+    }
+
+    return report
+
+
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description='Neural Network Pruning Lab')
+    parser = argparse.ArgumentParser(description='Knowledge Distillation Lab')
 
     # General arguments
     parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--teacher-epochs', type=int, default=100, help='Number of epochs for teacher training')
+    parser.add_argument('--student-epochs', type=int, default=100, help='Number of epochs for student training')
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
     parser.add_argument('--save-dir', type=str, default='./models_saved', help='Directory to save models')
-    parser.add_argument('--pretrained', action='store_true', help='Use pre-trained weights')
-    parser.add_argument('--skip-training', action='store_true', help='Skip training phase')
-    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda'],
-                       help='Device to use for computation')
 
-    # Experiment selection
-    parser.add_argument('--model', type=str, choices=['resnet18', 'vit', 'all'], default='all',
-                       help='Which model to train and prune')
-    parser.add_argument('--experiment', type=str, choices=['train', 'prune', 'all'], default='all',
-                       help='Which experiment to run')
+    # KD parameters
+    parser.add_argument('--alpha', type=float, default=0.5, help='Weight for hard target loss (0 to 1)')
+    parser.add_argument('--temperature', type=float, default=4.0, help='Temperature for soft targets')
+
+    # Skip flags for faster testing/resume
+    parser.add_argument('--skip-cnn-teacher', action='store_true', help='Skip CNN teacher training')
+    parser.add_argument('--skip-vit-teacher', action='store_true', help='Skip ViT teacher training')
+    parser.add_argument('--skip-cnn-student-no-kd', action='store_true', help='Skip CNN student (no KD) training')
+    parser.add_argument('--skip-vit-student-no-kd', action='store_true', help='Skip ViT student (no KD) training')
+    parser.add_argument('--skip-cnn-student-kd', action='store_true', help='Skip CNN student (with KD) training')
+    parser.add_argument('--skip-vit-student-kd', action='store_true', help='Skip ViT student (with KD) training')
 
     args = parser.parse_args()
 
     # Setup device
-    if args.device == 'auto':
-        device = setup_device()
-    else:
-        device = torch.device(args.device)
+    device = setup_device()
 
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # Results dictionary for report.json
-    results = {
-        'initial_accuracies': {},
-        'unstructured_pruning': {},
-        'structured_pruning': {}
-    }
+    # Get data loaders
+    print("\nLoading CIFAR-10 dataset...")
+    train_loader, test_loader = get_loaders(batch_size=args.batch_size)
+    print(f"Train batches: {len(train_loader)}, Test batches: {len(test_loader)}")
 
-    # Train and prune ResNet-18
-    if args.model in ['resnet18', 'all']:
-        if args.experiment in ['train', 'all']:
-            resnet_model, resnet_accuracy = train_resnet18(args, device)
-            results['initial_accuracies']['cnn_before_pruning'] = resnet_accuracy / 100.0
+    # Train teachers
+    cnn_teacher, vit_teacher, teacher_results = train_teachers(
+        args, device, train_loader, test_loader
+    )
 
-        if args.experiment in ['prune', 'all']:
-            # Load model if we skipped training
-            if args.skip_training:
-                resnet_model = get_resnet18_cifar10().to(device)
-                resnet_model.load_state_dict(torch.load(
-                    os.path.join(args.save_dir, 'cnn_before_pruning.pth'),
-                    map_location=device
-                ))
+    # Train students without KD
+    student_no_kd_results = train_students_without_kd(
+        args, device, train_loader, test_loader
+    )
 
-            # Target accuracy: 85% for ResNet-18
-            resnet_results = perform_pruning_experiment(
-                resnet_model, 'cnn', 85.0, args, device
-            )
+    # Train students with KD
+    student_kd_results = train_students_with_kd(
+        args, device, cnn_teacher, vit_teacher, train_loader, test_loader
+    )
 
-            results['unstructured_pruning']['cnn'] = resnet_results['unstructured']
-            results['structured_pruning']['cnn'] = resnet_results['structured']
-            results['unstructured_pruning']['cnn']['original_accuracy'] = resnet_results['original_accuracy']
-            results['structured_pruning']['cnn']['original_accuracy'] = resnet_results['original_accuracy']
+    # Generate report
+    print("\n" + "="*80)
+    print("GENERATING REPORT")
+    print("="*80)
 
-    # Train and prune ViT-Tiny
-    if args.model in ['vit', 'all']:
-        vit_model = None
-        target_vit_accuracy = 80.0  # Default target
+    report = generate_report(teacher_results, student_no_kd_results, student_kd_results)
 
-        if args.experiment in ['train', 'all']:
-            # Try pre-trained first, then from scratch
-            try:
-                vit_model, vit_accuracy = train_vit_tiny(args, device, pretrained=True)
-                target_vit_accuracy = 88.0  # Higher target for pre-trained
-            except Exception as e:
-                print(f"Pre-trained ViT failed: {e}")
-                print("Falling back to training from scratch...")
-                try:
-                    vit_model, vit_accuracy = train_vit_tiny(args, device, pretrained=False)
-                    target_vit_accuracy = 80.0  # Lower target for from-scratch
-                except Exception as e2:
-                    print(f"From-scratch ViT also failed: {e2}")
-                    print("Skipping ViT experiments")
-                    vit_model = None
-
-            if vit_model is not None:
-                results['initial_accuracies']['vit_before_pruning'] = vit_accuracy / 100.0
-
-        if args.experiment in ['prune', 'all'] and vit_model is not None:
-            # Load model if we skipped training
-            if args.skip_training or vit_model is None:
-                try:
-                    vit_model = get_vit_tiny_cifar10().to(device)
-                    vit_model.load_state_dict(torch.load(
-                        os.path.join(args.save_dir, 'vit_before_pruning.pth'),
-                        map_location=device
-                    ))
-                    target_vit_accuracy = 80.0
-                except Exception as e:
-                    print(f"Failed to load ViT model: {e}")
-                    vit_model = None
-
-            if vit_model is not None:
-                vit_results = perform_pruning_experiment(
-                    vit_model, 'vit', target_vit_accuracy, args, device
-                )
-
-                results['unstructured_pruning']['vit'] = vit_results['unstructured']
-                results['structured_pruning']['vit'] = vit_results['structured']
-                results['unstructured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
-                results['structured_pruning']['vit']['original_accuracy'] = vit_results['original_accuracy']
-
-    # Save results to report.json
     report_path = os.path.join(os.getcwd(), 'report.json')
     with open(report_path, 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(report, f, indent=2)
 
-    print(f"\n" + "="*60)
-    print("EXPERIMENT COMPLETED")
-    print("="*60)
-    print(f"Results saved to: {report_path}")
+    print(f"\nReport saved to: {report_path}")
     print(f"Model checkpoints saved to: {args.save_dir}")
 
     # Print summary
-    print("\nSUMMARY:")
-    if 'cnn_before_pruning' in results['initial_accuracies']:
-        print(f"ResNet-18 initial accuracy: {results['initial_accuracies']['cnn_before_pruning']:.3f}")
-    if 'vit_before_pruning' in results['initial_accuracies']:
-        print(f"ViT-Tiny initial accuracy: {results['initial_accuracies']['vit_before_pruning']:.3f}")
+    print("\n" + "="*80)
+    print("EXPERIMENT SUMMARY")
+    print("="*80)
+    print("\nCNN (ResNet):")
+    print(f"  Teacher Accuracy:              {report['cnn']['teacher_accuracy']:.4f} ({report['cnn']['teacher_accuracy']*100:.2f}%)")
+    print(f"  Student Accuracy (without KD): {report['cnn']['student_accuracy_without_kd']:.4f} ({report['cnn']['student_accuracy_without_kd']*100:.2f}%)")
+    print(f"  Student Accuracy (with KD):    {report['cnn']['student_accuracy_with_kd']:.4f} ({report['cnn']['student_accuracy_with_kd']*100:.2f}%)")
+    print(f"  KD Improvement:                +{(report['cnn']['student_accuracy_with_kd'] - report['cnn']['student_accuracy_without_kd'])*100:.2f}%")
 
-    for pruning_type in ['unstructured_pruning', 'structured_pruning']:
-        if results[pruning_type]:
-            print(f"\n{pruning_type.replace('_', ' ').title()} Results:")
-            for model_name, model_results in results[pruning_type].items():
-                sparsity = model_results.get('pruning_percentage', 0)
-                accuracy = model_results.get('pruned_accuracy', 0)
-                print(f"  {model_name}: {sparsity:.1f}% sparsity, {accuracy:.3f} accuracy")
+    print("\nViT (Vision Transformer):")
+    print(f"  Teacher Accuracy:              {report['vit']['teacher_accuracy']:.4f} ({report['vit']['teacher_accuracy']*100:.2f}%)")
+    print(f"  Student Accuracy (without KD): {report['vit']['student_accuracy_without_kd']:.4f} ({report['vit']['student_accuracy_without_kd']*100:.2f}%)")
+    print(f"  Student Accuracy (with KD):    {report['vit']['student_accuracy_with_kd']:.4f} ({report['vit']['student_accuracy_with_kd']*100:.2f}%)")
+    print(f"  KD Improvement:                +{(report['vit']['student_accuracy_with_kd'] - report['vit']['student_accuracy_without_kd'])*100:.2f}%")
+
+    print("\n" + "="*80)
+    print("LAB 2 COMPLETED SUCCESSFULLY!")
+    print("="*80)
 
 
 if __name__ == '__main__':
