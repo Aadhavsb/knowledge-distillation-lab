@@ -16,46 +16,37 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
-# Try to load modules if they exist (ignore errors)
-module load python 2>/dev/null || true
-module load cuda 2>/dev/null || true
-module load anaconda3 2>/dev/null || true
-
-# Print GPU information
-nvidia-smi
-
-# Find python (try multiple options)
-if command -v python &> /dev/null; then
-    PYTHON_CMD=python
-elif command -v python3 &> /dev/null; then
-    PYTHON_CMD=python3
-else
-    echo "ERROR: No Python found!"
-    exit 1
-fi
+# Load required modules (using correct names from your cluster)
+module load Python/3.11.3-GCCcore-12.3.0
+module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
 echo ""
-echo "Using Python: $PYTHON_CMD"
-$PYTHON_CMD --version
+echo "Loaded modules:"
+module list
 
-# Check if PyTorch is installed
-if $PYTHON_CMD -c "import torch" 2>/dev/null; then
-    echo "PyTorch already installed"
-    $PYTHON_CMD -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}')"
-else
-    echo "Installing PyTorch..."
-    $PYTHON_CMD -m pip install --user torch torchvision --index-url https://download.pytorch.org/whl/cu118 --quiet
-fi
+# Print GPU information
+echo ""
+nvidia-smi
+
+# Print Python and PyTorch versions
+echo ""
+echo "Python version:"
+python --version
+
+echo ""
+echo "PyTorch information:"
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda}'); print(f'GPU Count: {torch.cuda.device_count()}')"
 
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
 
+echo ""
 echo "=========================================="
 echo "Starting Knowledge Distillation Training"
 echo "=========================================="
 
 # Run the main training script
-$PYTHON_CMD main.py \
+python main.py \
     --teacher-epochs 100 \
     --student-epochs 100 \
     --batch-size 128 \
@@ -66,6 +57,7 @@ $PYTHON_CMD main.py \
 
 # Check exit status
 if [ $? -eq 0 ]; then
+    echo ""
     echo "=========================================="
     echo "Training completed successfully!"
     echo "=========================================="
@@ -81,6 +73,7 @@ if [ $? -eq 0 ]; then
     ls -lh models_saved/*.pth
 
 else
+    echo ""
     echo "=========================================="
     echo "Training failed with error code $?"
     echo "=========================================="
