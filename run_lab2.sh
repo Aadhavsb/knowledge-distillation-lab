@@ -16,10 +16,6 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
-# IMPORTANT: Unset PYTHONPATH to avoid conflicts with local packages
-unset PYTHONPATH
-export PYTHONNOUSERSITE=1
-
 # Load required modules (using correct names from your cluster)
 module load Python/3.11.3-GCCcore-12.3.0
 module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
@@ -39,11 +35,11 @@ python --version
 
 echo ""
 echo "PyTorch information:"
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda}'); print(f'GPU Count: {torch.cuda.device_count()}')"
+python -s -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda}'); print(f'GPU Count: {torch.cuda.device_count()}')"
 
 echo ""
 echo "Torchvision check:"
-python -c "import torchvision; print(f'Torchvision: {torchvision.__version__}')"
+python -s -c "import torchvision; print(f'Torchvision: {torchvision.__version__}')"
 
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
@@ -53,8 +49,8 @@ echo "=========================================="
 echo "Starting Knowledge Distillation Training"
 echo "=========================================="
 
-# Run the main training script
-python main.py \
+# Run the main training script with -s flag to ignore user site-packages
+python -s main.py \
     --teacher-epochs 100 \
     --student-epochs 100 \
     --batch-size 128 \
