@@ -7,8 +7,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32gb
 #SBATCH --time=06:00:00
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=your_email@case.edu
 
 # Print job information
 echo "=========================================="
@@ -18,34 +16,46 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
-# Load required modules (adjust based on your cluster)
-module load python/3.9
-module load cuda/11.8
+# Try to load modules if they exist (ignore errors)
+module load python 2>/dev/null || true
+module load cuda 2>/dev/null || true
+module load anaconda3 2>/dev/null || true
 
 # Print GPU information
 nvidia-smi
 
-# Activate virtual environment if you have one
-# source /path/to/your/venv/bin/activate
+# Find python (try multiple options)
+if command -v python &> /dev/null; then
+    PYTHON_CMD=python
+elif command -v python3 &> /dev/null; then
+    PYTHON_CMD=python3
+else
+    echo "ERROR: No Python found!"
+    exit 1
+fi
 
-# Install required packages if not already installed
-pip install torch torchvision tqdm --quiet
+echo ""
+echo "Using Python: $PYTHON_CMD"
+$PYTHON_CMD --version
+
+# Check if PyTorch is installed
+if $PYTHON_CMD -c "import torch" 2>/dev/null; then
+    echo "PyTorch already installed"
+    $PYTHON_CMD -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}')"
+else
+    echo "Installing PyTorch..."
+    $PYTHON_CMD -m pip install --user torch torchvision --index-url https://download.pytorch.org/whl/cu118 --quiet
+fi
 
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
-
-# Print Python and PyTorch versions
-python --version
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}')"
 
 echo "=========================================="
 echo "Starting Knowledge Distillation Training"
 echo "=========================================="
 
 # Run the main training script
-# Using 100 epochs for both teachers and students as per assignment
-# Alpha=0.5 and Temperature=4.0 are good defaults for KD
-python main.py \
+$PYTHON_CMD main.py \
     --teacher-epochs 100 \
     --student-epochs 100 \
     --batch-size 128 \
