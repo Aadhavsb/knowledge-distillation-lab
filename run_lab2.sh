@@ -16,7 +16,7 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
-# Load required modules (using correct names from your cluster)
+# Load required modules
 module load Python/3.11.3-GCCcore-12.3.0
 module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
@@ -35,11 +35,17 @@ python --version
 
 echo ""
 echo "PyTorch information:"
-python -s -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda}'); print(f'GPU Count: {torch.cuda.device_count()}')"
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda}'); print(f'GPU Count: {torch.cuda.device_count()}')"
+
+echo ""
+echo "Checking/Installing torchvision..."
+
+# Install compatible torchvision if not present (using --force-reinstall to ensure compatibility)
+python -m pip install --user --force-reinstall --no-deps torchvision==0.16.2
 
 echo ""
 echo "Torchvision check:"
-python -s -c "import torchvision; print(f'Torchvision: {torchvision.__version__}')"
+python -c "import torchvision; print(f'Torchvision: {torchvision.__version__}')"
 
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
@@ -49,8 +55,8 @@ echo "=========================================="
 echo "Starting Knowledge Distillation Training"
 echo "=========================================="
 
-# Run the main training script with -s flag to ignore user site-packages
-python -s main.py \
+# Run the main training script
+python main.py \
     --teacher-epochs 100 \
     --student-epochs 100 \
     --batch-size 128 \
